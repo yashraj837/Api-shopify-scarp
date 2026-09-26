@@ -2,8 +2,15 @@ import requests
 import csv
 import time
 import json
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+
+# Force unbuffered output for GitHub Actions
+sys.stdout.reconfigure(line_buffering=True)
 
 SERPER_API_KEY = "1afdf1789171e412bb4cf9f3507efd86e0203f4c"
+MAX_THREADS = 200
 
 queries = [
     'site:myshopify.com "clothing"',
@@ -57,7 +64,60 @@ queries = [
     'site:myshopify.com "maternity"',
     'site:myshopify.com "wedding"',
     'site:myshopify.com "gifts"',
+    'site:myshopify.com "accessories"',
+    'site:myshopify.com "lingerie"',
+    'site:myshopify.com "streetwear"',
+    'site:myshopify.com "sneakers"',
+    'site:myshopify.com "luxury"',
+    'site:myshopify.com "handmade"',
+    'site:myshopify.com "vintage"',
+    'site:myshopify.com "organic"',
+    'site:myshopify.com "vegan"',
+    'site:myshopify.com "CBD"',
+    'site:myshopify.com "protein"',
+    'site:myshopify.com "keto"',
+    'site:myshopify.com "gluten free"',
+    'site:myshopify.com "matcha"',
+    'site:myshopify.com "stationery"',
+    'site:myshopify.com "wallpaper"',
+    'site:myshopify.com "rugs"',
+    'site:myshopify.com "curtains"',
+    'site:myshopify.com "bedding"',
+    'site:myshopify.com "bathroom"',
+    'site:myshopify.com "storage"',
+    'site:myshopify.com "cleaning"',
+    'site:myshopify.com "lighting"',
+    'site:myshopify.com "perfume"',
+    'site:myshopify.com "cologne"',
+    'site:myshopify.com "beard"',
+    'site:myshopify.com "mens"',
+    'site:myshopify.com "womens"',
+    'site:myshopify.com "plus size"',
+    'site:myshopify.com "swimwear"',
+    'site:myshopify.com "activewear"',
+    'site:myshopify.com "leggings"',
+    'site:myshopify.com "hoodie"',
+    'site:myshopify.com "t-shirt"',
+    'site:myshopify.com "dress"',
+    'site:myshopify.com "socks"',
+    'site:myshopify.com "underwear"',
+    'site:myshopify.com "hat"',
+    'site:myshopify.com "wallet"',
+    'site:myshopify.com "belt"',
+    'site:myshopify.com "sunscreen"',
+    'site:myshopify.com "serum"',
+    'site:myshopify.com "moisturizer"',
+    'site:myshopify.com "shampoo"',
+    'site:myshopify.com "conditioner"',
+    'site:myshopify.com "essential oils"',
+    'site:myshopify.com "diffuser"',
+    'site:myshopify.com "crystals"',
+    'site:myshopify.com "meditation"',
 ]
+
+lock = Lock()
+verified_stores = []
+all_urls = set()
 
 def search_serper(query, page=0):
     url = "https://google.serper.dev/search"
@@ -71,40 +131,64 @@ def search_serper(query, page=0):
         "start": page * 10
     }
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
         data = response.json()
         results = data.get("organic", [])
         urls = [r["link"] for r in results if "myshopify.com" in r.get("link", "")]
         return urls
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Search error: {e}", flush=True)
         return []
 
 def verify_store(url):
     try:
-        # extract base domain
         base = url.split("/")[0] + "//" + url.split("/")[2]
-        check = requests.get(base + "/products.json", timeout=5)
-        if check.status_code == 200:
-            data = check.json()
+        response = requests.get(
+            base + "/products.json",
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        if response.status_code == 200:
+            data = response.json()
             products = data.get("products", [])
             if len(products) > 0:
+                with lock:
+                    verified_stores.append({
+                        "url": base,
+                        "product_count": len(products)
+                    })
+                print(f"✅ LIVE [{len(products)} products] {base}", flush=True)
                 return True
-    except:
-        pass
+            else:
+                print(f"⚠️  EMPTY {base}", flush=True)
+        elif response.status_code == 401:
+            print(f"🔒 LOCKED {base}", flush=True)
+        elif response.status_code == 404:
+            print(f"❌ DEAD {base}", flush=True)
+        else:
+            print(f"❓ STATUS {response.status_code} {base}", flush=True)
+    except requests.exceptions.Timeout:
+        print(f"⏱️  TIMEOUT {url}", flush=True)
+    except Exception as e:
+        print(f"⚠️  ERROR {url} → {e}", flush=True)
     return False
 
 def main():
-    all_urls = set()
-    verified = []
+    global all_urls
     credits_used = 0
 
-    print("Starting scrape...")
+    print("=" * 60, flush=True)
+    print("🚀 SHOPIFY STORE SCRAPER STARTED", flush=True)
+    print(f"📋 Total queries: {len(queries)}", flush=True)
+    print(f"🧵 Threads: {MAX_THREADS}", flush=True)
+    print("=" * 60, flush=True)
+
+    print("\n📡 PHASE 1 — Scraping URLs from Serper\n", flush=True)
 
     for query in queries:
-        for page in range(5):  # 5 pages per query = 50 results per niche
-            if credits_used >= 2400:  # leave small buffer
-                print("Credits almost used up, stopping")
+        for page in range(5):
+            if credits_used >= 2400:
+                print("⛔ Credits limit reached — stopping scrape", flush=True)
                 break
 
             urls = search_serper(query, page)
@@ -112,33 +196,42 @@ def main():
             all_urls.update(new_urls)
             credits_used += 1
 
-            print(f"Query: '{query}' Page {page+1} → {len(new_urls)} new URLs | Total: {len(all_urls)} | Credits: {credits_used}")
-
-            time.sleep(1)  # be gentle with API
+            print(f"[{credits_used}/2400] '{query}' p{page+1} → +{len(new_urls)} new | Total: {len(all_urls)}", flush=True)
+            time.sleep(0.5)
 
         if credits_used >= 2400:
             break
 
-    print(f"\nTotal raw URLs: {len(all_urls)}")
-    print("Now verifying stores...")
+    print(f"\n✅ Phase 1 Done — {len(all_urls)} raw URLs collected", flush=True)
 
-    for url in all_urls:
-        is_live = verify_store(url)
-        if is_live:
-            verified.append(url)
-            print(f"✅ Live: {url}")
-        else:
-            print(f"❌ Dead: {url}")
-        time.sleep(0.5)
+    print("\n" + "=" * 60, flush=True)
+    print(f"🔍 PHASE 2 — Verifying {len(all_urls)} stores with {MAX_THREADS} threads\n", flush=True)
 
-    # Save to CSV
+    url_list = list(all_urls)
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = {executor.submit(verify_store, url): url for url in url_list}
+        for future in as_completed(futures):
+            future.result()
+            completed += 1
+            if completed % 100 == 0:
+                print(f"⏳ Progress: {completed}/{len(url_list)} checked | {len(verified_stores)} live so far", flush=True)
+
+    print(f"\n✅ Phase 2 Done — {len(verified_stores)} live stores found", flush=True)
+
+    # Save CSV
     with open("shopify_stores.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["store_url"])
-        for url in verified:
-            writer.writerow([url])
+        writer = csv.DictWriter(f, fieldnames=["url", "product_count"])
+        writer.writeheader()
+        writer.writerows(verified_stores)
 
-    print(f"\nDone! {len(verified)} verified live stores saved to shopify_stores.csv")
+    print("\n" + "=" * 60, flush=True)
+    print(f"🎉 DONE!", flush=True)
+    print(f"📊 Raw URLs scraped: {len(all_urls)}", flush=True)
+    print(f"✅ Verified live stores: {len(verified_stores)}", flush=True)
+    print(f"💾 Saved to: shopify_stores.csv", flush=True)
+    print("=" * 60, flush=True)
 
 if __name__ == "__main__":
     main()
